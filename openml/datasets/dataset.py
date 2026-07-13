@@ -240,13 +240,18 @@ class OpenMLDataset(OpenMLBase):
         if qualities_file is not None:
             self._qualities = _read_qualities(Path(qualities_file))
 
-        if data_file is not None:
+        # The dataset may be stored as an ARFF file (pointed to by data_file) or a
+        # Parquet file (pointed to by parquet_file). Use whichever is present.
+        arff_or_parquet_file = data_file if data_file is not None else parquet_file
+        if arff_or_parquet_file is not None:
             data_pickle, data_feather, feather_attribute = self._compressed_cache_file_paths(
-                Path(data_file)
+                Path(arff_or_parquet_file)
             )
             self.data_pickle_file = data_pickle if Path(data_pickle).exists() else None
             self.data_feather_file = data_feather if Path(data_feather).exists() else None
-            self.feather_attribute_file = feather_attribute if Path(feather_attribute) else None
+            self.feather_attribute_file = (
+                feather_attribute if Path(feather_attribute).exists() else None
+            )
         else:
             self.data_pickle_file = None
             self.data_feather_file = None
