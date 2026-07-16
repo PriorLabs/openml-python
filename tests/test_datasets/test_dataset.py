@@ -337,19 +337,30 @@ class OpenMLDatasetCacheReuseTest(TestBase):
             pickle.dump((data, categorical, attribute_names), fh, pickle.HIGHEST_PROTOCOL)
         return pickle_file, data, categorical, attribute_names
 
-    def test_download_data_false_finds_existing_compressed_cache(self):
+    def test_compressed_cache_lookup_is_deferred_until_load(self):
         did = 987654
         pickle_file, _, _, _ = self._write_pickle_cache(did)
 
         # Mimic `get_dataset(did, download_data=False)`: no data/parquet file resolved.
-        dataset = OpenMLDataset(
-            name="unittest",
-            description="a description",
-            data_format="arff",
-            dataset_id=did,
-        )
+        with unittest.mock.patch.object(
+            OpenMLDataset,
+            "_locate_existing_compressed_cache_files",
+            autospec=True,
+        ) as locate:
+            dataset = OpenMLDataset(
+                name="unittest",
+                description="a description",
+                data_format="arff",
+                dataset_id=did,
+            )
+            # Construction must not probe the filesystem for the compressed cache.
+            locate.assert_not_called()
 
-        # The deterministic compressed-cache path must be detected on disk.
+        assert dataset.data_pickle_file is None
+        assert dataset.data_feather_file is None
+
+        # The deterministic compressed-cache path is resolved on first load.
+        dataset._load_data()
         assert dataset.data_pickle_file is not None
         assert Path(dataset.data_pickle_file) == pickle_file
 

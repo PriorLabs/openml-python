@@ -241,21 +241,14 @@ class OpenMLDataset(OpenMLBase):
             self._qualities = _read_qualities(Path(qualities_file))
 
         # The dataset may be stored as an ARFF file (pointed to by data_file) or a
-        # Parquet file (pointed to by parquet_file). Use whichever is present.
-        arff_or_parquet_file = data_file if data_file is not None else parquet_file
+        # Parquet file (pointed to by parquet_file). The compressed-cache paths are
+        # resolved lazily on first data load (see `_load_data`) rather than here, so
+        # that a metadata-only caller does not pay for the (possibly high-latency)
+        # filesystem probes of files it never reads.
         self.data_pickle_file: str | Path | None = None
         self.data_feather_file: str | Path | None = None
         self.feather_attribute_file: str | Path | None = None
-        if arff_or_parquet_file is not None:
-            self._set_existing_compressed_cache_files(Path(arff_or_parquet_file))
-        elif self.dataset_id is not None:
-            # No data file was resolved (e.g. `download_data=False`), but a compressed
-            # cache created by an earlier download may still be on disk. Its path is
-            # fully deterministic from the dataset id, so look for it directly rather
-            # than assuming it is absent -- otherwise `get_data()` would needlessly
-            # recreate (and rewrite) the already-cached file, which fails on a
-            # read-only cache.
-            self._locate_existing_compressed_cache_files()
+        self._compressed_cache_located = False
 
     @property
     def features(self) -> dict[int, OpenMLDataFeature]:
@@ -645,8 +638,30 @@ class OpenMLDataset(OpenMLBase):
         attribute_names = list(data.columns)
         return attribute_names, categorical, data
 
-    def _load_data(self) -> tuple[pd.DataFrame | scipy.sparse.csr_matrix, list[bool], list[str]]:  # noqa: PLR0912, C901
+    def _ensure_compressed_cache_located(self) -> None:
+        """Resolve the compressed-cache paths from disk, at most once.
+
+        Done on first data load rather than in `__init__` so that metadata-only
+        callers never pay for these (possibly high-latency) filesystem probes.
+        """
+        if self._compressed_cache_located:
+            return
+        self._compressed_cache_located = True
+
+        arff_or_parquet_file = self.data_file if self.data_file is not None else self.parquet_file
+        if arff_or_parquet_file is not None:
+            self._set_existing_compressed_cache_files(Path(arff_or_parquet_file))
+        elif self.dataset_id is not None:
+            # No data file resolved (e.g. `download_data=False`), but a compressed cache
+            # from an earlier download may exist. Its path is deterministic from the
+            # dataset id, so look for it rather than assuming absence -- otherwise we
+            # would needlessly rewrite it, failing on a read-only cache.
+            self._locate_existing_compressed_cache_files()
+
+    def _load_data(self) -> tuple[pd.DataFrame | scipy.sparse.csr_matrix, list[bool], list[str]]:  # noqa: PLR0912, PLR0915, C901
         """Load data from compressed format or arff. Download data if not present on disk."""
+        self._ensure_compressed_cache_located()
+
         need_to_create_pickle = self.cache_format == "pickle" and self.data_pickle_file is None
         need_to_create_feather = self.cache_format == "feather" and self.data_feather_file is None
 
