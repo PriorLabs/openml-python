@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import os
+import pickle
 import unittest.mock
+from pathlib import Path
 from time import time
 
 import numpy as np
@@ -313,6 +315,66 @@ class OpenMLDatasetTest(TestBase):
         self.assertEqual(self.iris, self.iris)
         self.assertNotEqual(self.iris, self.titanic)
         self.assertNotEqual(self.titanic, 'Wrong_object')
+
+
+class OpenMLDatasetCacheReuseTest(TestBase):
+    """Regression tests for reusing an existing compressed cache.
+
+    These do not require server access: they place a compressed cache file on disk
+    and construct the dataset directly, as ``get_dataset(download_data=False)`` does.
+    """
+
+    def _write_pickle_cache(self, did):
+        did_cache_dir = openml.utils._create_cache_directory_for_id(
+            openml.datasets.functions.DATASETS_CACHE_DIR_NAME,
+            did,
+        )
+        data = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+        categorical = [False, False]
+        attribute_names = ["a", "b"]
+        pickle_file = did_cache_dir / f"dataset_{did}.pkl.py3"
+        with open(pickle_file, "wb") as fh:
+            pickle.dump((data, categorical, attribute_names), fh, pickle.HIGHEST_PROTOCOL)
+        return pickle_file, data, categorical, attribute_names
+
+    def test_download_data_false_finds_existing_compressed_cache(self):
+        did = 987654
+        pickle_file, _, _, _ = self._write_pickle_cache(did)
+
+        # Mimic `get_dataset(did, download_data=False)`: no data/parquet file resolved.
+        dataset = OpenMLDataset(
+            name="unittest",
+            description="a description",
+            data_format="arff",
+            dataset_id=did,
+        )
+
+        # The deterministic compressed-cache path must be detected on disk.
+        assert dataset.data_pickle_file is not None
+        assert Path(dataset.data_pickle_file) == pickle_file
+
+    def test_download_data_false_reads_cache_without_rewrite(self):
+        did = 987655
+        pickle_file, data, categorical, attribute_names = self._write_pickle_cache(did)
+        mtime_before = pickle_file.stat().st_mtime_ns
+
+        dataset = OpenMLDataset(
+            name="unittest",
+            description="a description",
+            data_format="arff",
+            dataset_id=did,
+        )
+        # Loading must reuse the cache and never trigger a (re)download or rewrite.
+        dataset._download_data = unittest.mock.MagicMock(
+            side_effect=AssertionError("data should not be (re)downloaded"),
+        )
+        loaded, loaded_categorical, loaded_names = dataset._load_data()
+
+        pd.testing.assert_frame_equal(loaded, data)
+        assert loaded_categorical == categorical
+        assert loaded_names == attribute_names
+        assert pickle_file.stat().st_mtime_ns == mtime_before
+
 
 class OpenMLDatasetTestOnTestServer(TestBase):
     def setUp(self):

@@ -243,19 +243,19 @@ class OpenMLDataset(OpenMLBase):
         # The dataset may be stored as an ARFF file (pointed to by data_file) or a
         # Parquet file (pointed to by parquet_file). Use whichever is present.
         arff_or_parquet_file = data_file if data_file is not None else parquet_file
+        self.data_pickle_file: str | Path | None = None
+        self.data_feather_file: str | Path | None = None
+        self.feather_attribute_file: str | Path | None = None
         if arff_or_parquet_file is not None:
-            data_pickle, data_feather, feather_attribute = self._compressed_cache_file_paths(
-                Path(arff_or_parquet_file)
-            )
-            self.data_pickle_file = data_pickle if Path(data_pickle).exists() else None
-            self.data_feather_file = data_feather if Path(data_feather).exists() else None
-            self.feather_attribute_file = (
-                feather_attribute if Path(feather_attribute).exists() else None
-            )
-        else:
-            self.data_pickle_file = None
-            self.data_feather_file = None
-            self.feather_attribute_file = None
+            self._set_existing_compressed_cache_files(Path(arff_or_parquet_file))
+        elif self.dataset_id is not None:
+            # No data file was resolved (e.g. `download_data=False`), but a compressed
+            # cache created by an earlier download may still be on disk. Its path is
+            # fully deterministic from the dataset id, so look for it directly rather
+            # than assuming it is absent -- otherwise `get_data()` would needlessly
+            # recreate (and rewrite) the already-cached file, which fails on a
+            # read-only cache.
+            self._locate_existing_compressed_cache_files()
 
     @property
     def features(self) -> dict[int, OpenMLDataFeature]:
@@ -542,6 +542,49 @@ class OpenMLDataset(OpenMLBase):
         data_feather_file = data_file.with_suffix(".feather")
         feather_attribute_file = data_file.with_suffix(".feather.attributes.pkl.py3")
         return data_pickle_file, data_feather_file, feather_attribute_file
+
+    def _set_existing_compressed_cache_files(self, arff_or_parquet_file: Path) -> bool:
+        """Populate the compressed-cache attributes for files that exist on disk.
+
+        Derives the compressed-cache paths from ``arff_or_parquet_file`` and sets
+        ``data_pickle_file`` / ``data_feather_file`` / ``feather_attribute_file`` for
+        each file that already exists. Returns whether a usable compressed cache
+        (pickle or feather) was found.
+        """
+        data_pickle, data_feather, feather_attribute = self._compressed_cache_file_paths(
+            arff_or_parquet_file
+        )
+        if data_pickle.exists():
+            self.data_pickle_file = data_pickle
+        if data_feather.exists():
+            self.data_feather_file = data_feather
+        if feather_attribute.exists():
+            self.feather_attribute_file = feather_attribute
+        return self.data_pickle_file is not None or self.data_feather_file is not None
+
+    def _locate_existing_compressed_cache_files(self) -> None:
+        """Look for an already-cached compressed file when no data file was resolved.
+
+        When a dataset is fetched with ``download_data=False`` neither the ARFF nor the
+        Parquet path is resolved, but the compressed cache written by an earlier
+        download may still be on disk. The candidate data-file names are deterministic
+        from the dataset id, so try each and populate the compressed-cache attributes
+        from whichever compressed files exist.
+        """
+        # Local import to avoid a circular import (functions imports this module).
+        from openml.utils import _get_cache_dir_for_id
+
+        from .functions import DATASETS_CACHE_DIR_NAME
+
+        assert self.dataset_id is not None
+        did_cache_dir = _get_cache_dir_for_id(DATASETS_CACHE_DIR_NAME, self.dataset_id)
+        candidate_data_files = [
+            did_cache_dir / f"dataset_{self.dataset_id}.pq",  # parquet download
+            did_cache_dir / "dataset.arff",  # arff download
+        ]
+        for data_file in candidate_data_files:
+            if self._set_existing_compressed_cache_files(data_file):
+                break
 
     def _cache_compressed_file_from_file(
         self,
